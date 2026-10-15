@@ -1,5 +1,15 @@
 import { initializeApp } from "firebase/app";
-import { getFirestore } from "firebase/firestore";
+import {
+    initializeFirestore,
+    persistentLocalCache,
+    persistentMultipleTabManager,
+} from "firebase/firestore";
+import { getStorage } from "firebase/storage";
+import {
+    getAuth,
+    setPersistence,
+    browserLocalPersistence,
+} from "firebase/auth";
 
 const firebaseConfig = {
     apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -10,6 +20,19 @@ const firebaseConfig = {
     appId: import.meta.env.VITE_FIREBASE_APP_ID,
 };
 
-
 export const app = initializeApp(firebaseConfig);
-export const db = getFirestore(app);
+
+// Modern offline-first Firestore
+export const db = initializeFirestore(app, {
+    localCache: persistentLocalCache({
+        tabManager: persistentMultipleTabManager(),
+    }),
+});
+
+export const storage = getStorage(app);
+export const auth = getAuth(app);
+
+// Persist auth across browser close / power cut
+setPersistence(auth, browserLocalPersistence).catch((err) => {
+    console.error("Auth persistence failed:", err);
+});

@@ -13,6 +13,7 @@ import {
 import { NavLink, Outlet } from "react-router-dom";
 import Sidebar from "../components/Sidebar";
 import { useLocation } from "react-router-dom";
+import OfflineBanner from "../components/OfflineBanner";
 
 function MainLayout() {
     const [mobileOpen, setMobileOpen] = useState(false);
@@ -28,9 +29,10 @@ function MainLayout() {
 
 
     return (
-        <div className="flex min-h-screen bg-slate-50">
+        <div className="flex min-h-screen w-full overflow-x-clip bg-slate-50">
+            <OfflineBanner />
             {/* Existing sidebar: retain for tablet and PC */}
-            <div className="hidden sm:block">
+            <div className="hidden shrink-0 sm:block">
                 <Sidebar
                     mobileOpen={mobileOpen}
                     onClose={() => setMobileOpen(false)}
@@ -55,7 +57,7 @@ function MainLayout() {
                 </>
             )}
 
-            <div className="min-w-0 flex-1">
+            <div className="min-w-0 flex-1 pb-16 sm:pb-0">
                 {/* Existing mobile shop header */}
                 {isDashboard && (
                     <header className="flex h-[60px] items-center gap-3 bg-[#087443] px-3 text-white sm:hidden">

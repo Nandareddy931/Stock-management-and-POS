@@ -628,6 +628,7 @@ function Billing() {
 
                 paymentStatus:
                     finalPaymentStatus,
+                paymentMode: paymentMode,
             };
 
 

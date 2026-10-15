@@ -1,5 +1,4 @@
 import {
-    addDoc,
     collection,
     doc,
     getDoc,
@@ -8,9 +7,15 @@ import {
     query,
     serverTimestamp,
     where,
+    writeBatch,
+    increment,
 } from "firebase/firestore";
 
 import { db } from "../firebase/config";
+
+// ============================================================
+// TYPES
+// ============================================================
 
 export interface BillItem {
     productId: string;
@@ -22,6 +27,7 @@ export interface BillItem {
 }
 
 export type PaymentStatus = "Paid" | "Partial" | "Credit";
+export type PaymentMode = "Cash" | "UPI" | "Card" | "Other";
 
 export interface BillData {
     billNumber: string;
@@ -33,6 +39,7 @@ export interface BillData {
     grandTotal: number;
     paidAmount: number;
     paymentStatus: PaymentStatus;
+    paymentMode?: PaymentMode;
 }
 
 export interface Bill extends BillData {
@@ -40,24 +47,33 @@ export interface Bill extends BillData {
     createdAt?: unknown;
 }
 
+// ============================================================
+// COLLECTION REFERENCE
+// ============================================================
+
 const billsCollection = collection(db, "bills");
+
+// ============================================================
+// BILL NUMBER
+// ============================================================
 
 /**
  * Generate a professional bill number.
  *
- * Example:
- * BRD-2026-482731
+ * Example: BRD-2026-482731
  *
  * The timestamp component makes the number highly unlikely
  * to collide when bills are created offline on multiple devices.
  */
 export const generateBillNumber = (): string => {
     const year = new Date().getFullYear();
-
     const timestampPart = Date.now().toString().slice(-6);
-
     return `BRD-${year}-${timestampPart}`;
 };
+
+// ============================================================
+// VALIDATION
+// ============================================================
 
 /**
  * Validate bill data before saving.
@@ -122,8 +138,15 @@ export const validateBill = (bill: BillData): string[] => {
     return errors;
 };
 
+// ============================================================
+// DUPLICATE CHECK (ONLINE ONLY)
+// ============================================================
+
 /**
  * Check whether a bill number already exists.
+ *
+ * NOTE: This requires an online connection. Callers should
+ * only invoke this when navigator.onLine === true.
  */
 export const isBillNumberExists = async (
     billNumber: string
@@ -138,35 +161,96 @@ export const isBillNumberExists = async (
     return !snapshot.empty;
 };
 
-/**
- * Save a bill to Firestore.
- */
-export const saveBill = async (
-    bill: BillData
-): Promise<string> => {
-    const errors = validateBill(bill);
+// ============================================================
+// SAVE BILL — OFFLINE-SAFE
+// ============================================================
 
+/**
+ * Save a bill + decrement stock — offline-safe.
+ *
+ * Uses a single writeBatch so:
+ * - Works offline (all writes are queued locally)
+ * - Atomic — either all writes succeed or none do
+ * - No server round-trip needed to show success
+ */
+export const saveBill = async (bill: BillData): Promise<string> => {
+    const errors = validateBill(bill);
     if (errors.length > 0) {
         throw new Error(errors.join("\n"));
     }
 
-    const billNumberExists = await isBillNumberExists(
-        bill.billNumber
-    );
-
-    if (billNumberExists) {
-        throw new Error(
-            `Bill number ${bill.billNumber} already exists. Please generate a new bill number.`
-        );
+    // Duplicate check ONLY when online (queries don't work offline)
+    if (navigator.onLine) {
+        try {
+            const exists = await isBillNumberExists(bill.billNumber);
+            if (exists) {
+                throw new Error(
+                    `Bill number ${bill.billNumber} already exists. Please generate a new bill number.`
+                );
+            }
+        } catch (err) {
+            // If the check itself fails (e.g., network dropped mid-check),
+            // fall through and continue saving — timestamp-based bill numbers
+            // make duplicates practically impossible.
+            if (
+                err instanceof Error &&
+                err.message.includes("already exists")
+            ) {
+                throw err;
+            }
+            console.warn("Duplicate check skipped:", err);
+        }
     }
 
-    const billRef = await addDoc(billsCollection, {
+    const batch = writeBatch(db);
+
+    // 1. Create bill document with a client-side ID (works offline)
+    const billRef = doc(collection(db, "bills"));
+    const billId = billRef.id;
+
+    batch.set(billRef, {
         ...bill,
+        id: billId,
         createdAt: serverTimestamp(),
     });
 
-    return billRef.id;
+    // 2. Queue stock decrements + movement logs
+    for (const item of bill.items) {
+        // Decrement product stock
+        const productRef = doc(db, "products", item.productId);
+        batch.update(productRef, {
+            currentStock: increment(-item.quantity),
+            updatedAt: serverTimestamp(),
+        });
+
+        // Log the stock movement (audit trail)
+        const movementRef = doc(collection(db, "stockMovements"));
+        batch.set(movementRef, {
+            productId: item.productId,
+            product: item.productName,
+            type: "SALE",
+            quantity: -item.quantity,
+            unit: item.unit,
+            rate: item.sellingPrice,
+            amount: item.amount,
+            billId,
+            billNumber: bill.billNumber,
+            customerName: bill.customerName,
+            customerPhone: bill.customerPhone,
+            movementDate: bill.billDate,
+            createdAt: serverTimestamp(),
+        });
+    }
+
+    // 3. Commit — resolves IMMEDIATELY when offline
+    await batch.commit();
+
+    return billId;
 };
+
+// ============================================================
+// READ HELPERS
+// ============================================================
 
 /**
  * Get a single bill by Firestore document ID.
@@ -175,7 +259,6 @@ export const getBillById = async (
     billId: string
 ): Promise<Bill | null> => {
     const billRef = doc(db, "bills", billId);
-
     const snapshot = await getDoc(billRef);
 
     if (!snapshot.exists()) {
@@ -204,7 +287,6 @@ export const getBills = async (): Promise<Bill[]> => {
 
     return snapshot.docs.map((billDoc) => {
         const data = billDoc.data();
-
         return {
             id: billDoc.id,
             ...(data as BillData),
@@ -228,7 +310,6 @@ export const searchBillsByCustomerPhone = async (
 
     return snapshot.docs.map((billDoc) => {
         const data = billDoc.data();
-
         return {
             id: billDoc.id,
             ...(data as BillData),
